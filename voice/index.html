@@ -463,9 +463,44 @@ function buildRecognition() {
   };
 
   recognition.onerror = (event) => {
-    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      addTurn("jarvis", "I need microphone permission to listen, sir.", { error: true });
-      setEar(false);
+    // Chrome reports several quite different problems through this one event,
+    // and the default (a silent no-op) leaves you guessing. Name each one.
+    const messages = {
+      "not-allowed":
+        "Microphone access was blocked. Click the padlock in the address bar, " +
+        "set Microphone to Allow, then reload the page.",
+      "service-not-allowed":
+        "Chrome refused speech recognition for this page. Load the shell at " +
+        "http://127.0.0.1:4731 — not over a LAN address — and allow the mic.",
+      "audio-capture":
+        "No microphone was found. Check that one is plugged in and selected " +
+        "in Windows sound settings.",
+      "network":
+        "Chrome's speech service is unreachable. In Chrome's speech recognition " +
+        "this usually means its Google speech backend could not be reached — " +
+        "check your connection or VPN, then reload. (You can still type to me.)",
+      "aborted":
+        "Recognition stopped.",
+      "no-speech":
+        "I didn't catch anything. Try again, a little closer to the mic.",
+    };
+
+    const message = messages[event.error];
+    if (!message) return;
+
+    // "no-speech" and "aborted" are routine while listening continuously; do
+    // not spam the transcript with them.
+    if (event.error === "no-speech" || event.error === "aborted") return;
+
+    addTurn("jarvis", message, { error: true });
+
+    // Anything fatal drops out of hands-free mode so the UI is not lying.
+    if (event.error === "not-allowed" || event.error === "service-not-allowed" ||
+        event.error === "audio-capture" || event.error === "network") {
+      state.ear = false;
+      el.ear.setAttribute("aria-pressed", "false");
+      el.ear.textContent = "Ear off";
+      setOrb("");
     }
   };
 
@@ -500,6 +535,11 @@ function setEar(on) {
   el.ear.textContent = on ? "Ear on" : "Ear off";
 
   if (on) {
+    // Ask for the microphone explicitly. Speech recognition would prompt too,
+    // but requesting it here means a refusal surfaces immediately and clearly
+    // instead of as silence.
+    requestMicrophone();
+
     if (!state.recognition) {
       state.recognition = buildRecognition();
       if (!state.recognition) {
@@ -517,6 +557,33 @@ function setEar(on) {
   } else {
     stopListening();
     setOrb("");
+  }
+}
+
+// Browsers only expose the microphone on a secure origin. 127.0.0.1 and
+// localhost qualify; a LAN address does not, and that failure is otherwise mute.
+async function requestMicrophone() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    addTurn("jarvis",
+      "This page can't reach a microphone. Browsers only allow that on " +
+      "http://127.0.0.1 or https — check the address bar.", { error: true });
+    return false;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Release the device at once; speech recognition opens its own capture.
+    stream.getTracks().forEach((track) => track.stop());
+    return true;
+  } catch (error) {
+    const reason = error?.name === "NotAllowedError"
+      ? "You blocked the microphone. Click the padlock in the address bar, " +
+        "set Microphone to Allow, then reload the page."
+      : `I can't open a microphone (${error?.name || "unknown error"}).`;
+    addTurn("jarvis", reason, { error: true });
+    state.ear = false;
+    el.ear.setAttribute("aria-pressed", "false");
+    el.ear.textContent = "Ear off";
+    return false;
   }
 }
 
