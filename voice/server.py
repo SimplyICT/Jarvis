@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -48,6 +50,80 @@ DEFAULT_HOST = "127.0.0.1"
 JOB_TTL_SECONDS = 3600
 MAX_BODY_BYTES = 1_000_000
 UI_FILE = Path(__file__).resolve().parent / "index.html"
+
+# Neural text-to-speech, rendered on the server.
+#
+# Why server-side at all: Windows exposes its good neural voices only to Edge,
+# so Chrome and Firefox fall back to the robotic SAPI set. Rendering here means
+# every browser gets the same voice. The browser also gains real pitch control,
+# which Edge's own neural voices ignore.
+NEURAL_VOICES = [
+    # short_name, label, pitch, rate, note
+    ("en-GB-RyanNeural", "Ryan (British)", "+0Hz", "+0%", "British male, neutral"),
+    ("en-GB-RyanNeural", "Ryan (measured)", "-6Hz", "-6%", "British male, lower and slower"),
+    ("en-GB-RyanNeural", "Ryan (deliberate)", "-12Hz", "-8%", "British male, deepest, most JARVIS"),
+    ("en-GB-ThomasNeural", "Thomas (British)", "-4Hz", "-4%", "British male, warmer"),
+    ("en-US-ChristopherNeural", "Christopher (Authority)", "-10Hz", "-6%", "US male, transatlantic"),
+    ("en-US-SteffanNeural", "Steffan (Rational)", "-8Hz", "-5%", "US male, drier"),
+    ("en-AU-WilliamNeural", "William (Australian)", "-4Hz", "-4%", "Australian male, local calls"),
+]
+DEFAULT_NEURAL_VOICE = "en-GB-RyanNeural"
+
+# Post-processing chains.
+#
+# A clean TTS read is flat next to the film's JARVIS, which is a studio
+# recording: close-mic'd, compressed, with a faint metallic ring and a touch of
+# room. These chains add that production. "movie" is the chosen default and was
+# picked by ear from an audition (`scripts/audition_effects.py`).
+TREATMENTS: list[tuple[str, str, str]] = [
+    ("none", "None (dry TTS read)", ""),
+    ("warm",
+     "Warm",
+     "highpass=f=85,"
+     "acompressor=threshold=-18dB:ratio=3:attack=6:release=220:makeup=1.6,"
+     "bass=g=3.5:f=180,"
+     "equalizer=f=3200:t=q:w=0.9:g=1.6,"
+     "alimiter=limit=0.94"),
+    ("movie",
+     "Movie (chosen)",
+     "highpass=f=85,"
+     "acompressor=threshold=-19dB:ratio=3.5:attack=6:release=240:makeup=1.8,"
+     "bass=g=3:f=180,"
+     "equalizer=f=3200:t=q:w=0.9:g=1.8,"
+     "aecho=0.85:0.5:9:0.14,"
+     "alimiter=limit=0.94"),
+    ("metallic",
+     "Metallic (HUD)",
+     "asetrate=24000*1.05,aresample=24000,"
+     "flanger=delay=0:depth=2:regen=50:width=71:speed=0.5,"
+     "aecho=0.8:0.88:15:0.5,"
+     "highpass=f=200,"
+     "treble=g=6"),
+    ("hud",
+     "Crisp HUD (dry, no echo)",
+     "highpass=f=150,"
+     "equalizer=f=2600:t=q:w=1.0:g=2.5,"
+     "equalizer=f=7000:t=q:w=1.2:g=2,"
+     "acompressor=threshold=-20dB:ratio=3:attack=5:release=180:makeup=1.7,"
+     "alimiter=limit=0.95"),
+    ("deep",
+     "Deep authority (lower, slower)",
+     "asetrate=24000*0.94,aresample=24000,"
+     "highpass=f=80,"
+     "acompressor=threshold=-20dB:ratio=4:attack=8:release=260:makeup=2.0,"
+     "bass=g=4:f=170,"
+     "alimiter=limit=0.94"),
+]
+TREATMENT_CHAINS = {name: chain for name, _label, chain in TREATMENTS}
+DEFAULT_TREATMENT = os.environ.get("JARVIS_TTS_TREATMENT", "movie")
+
+# Rendered audio is content-addressed and cached, because the same phrases
+# recur constantly ("At your service, sir") and a cache hit is instant.
+TTS_CACHE_DIR = Path(tempfile.gettempdir()) / "jarvis-tts-cache"
+TTS_MAX_CHARS = 3000
+TTS_TIMEOUT_SECONDS = 45
+FFMPEG_TIMEOUT_SECONDS = 60
+
 
 # Jobs live in memory: this is a single-user local tool, not a service.
 _jobs: dict[str, dict] = {}
@@ -177,7 +253,167 @@ def status_payload() -> dict:
             "brain_path": str(brain) if brain else None,
         },
         "profile": os.environ.get("DSH_PROFILE", "headless"),
+        "tts": {
+            "available": neural_tts_available(),
+            "ffmpeg": ffmpeg_available(),
+            "default_voice": os.environ.get("JARVIS_TTS_VOICE", DEFAULT_NEURAL_VOICE),
+            "default_treatment": DEFAULT_TREATMENT,
+            "voices": [
+                {"id": voice, "label": label, "pitch": pitch, "rate": rate, "note": note}
+                for voice, label, pitch, rate, note in NEURAL_VOICES
+            ],
+            "treatments": [
+                {"id": name, "label": label,
+                 "active": bool(chain) and ffmpeg_available()}
+                for name, label, chain in TREATMENTS
+            ],
+        },
     }
+
+
+# --------------------------------------------------------------------------
+# Neural text-to-speech
+# --------------------------------------------------------------------------
+
+_tts_available: bool | None = None
+
+
+def neural_tts_available() -> bool:
+    """Is edge-tts importable? Probed once and cached, since it costs a spawn."""
+    global _tts_available
+    if _tts_available is None:
+        try:
+            probe = subprocess.run(
+                [sys.executable, "-c", "import edge_tts"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+            _tts_available = probe.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _tts_available = False
+    return _tts_available
+
+
+def _cache_key(text: str, voice: str, pitch: str, rate: str, treatment: str) -> str:
+    import hashlib
+    payload = f"{voice}|{pitch}|{rate}|{treatment}|{text}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def apply_treatment(source: Path, dest: Path, treatment: str) -> tuple[bool, str]:
+    """Run the treatment's ffmpeg chain. Returns (ok, error)."""
+    chain = TREATMENT_CHAINS.get(treatment, "")
+    if not chain:
+        if source != dest:
+            shutil.copy(source, dest)
+        return True, ""
+
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(source),
+             "-af", chain, "-ac", "1", "-ar", "24000", "-b:a", "96k", str(dest)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"audio treatment timed out after {FFMPEG_TIMEOUT_SECONDS}s"
+    except OSError as exc:
+        return False, f"could not run ffmpeg: {exc}"
+
+    if result.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+        detail = (result.stderr or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit code {result.returncode}"
+        return False, f"audio treatment failed: {tail}"
+
+    return True, ""
+
+
+def synthesize(text: str, voice: str, pitch: str, rate: str,
+               treatment: str = DEFAULT_TREATMENT) -> tuple[Path | None, str]:
+    """Render text to a treated MP3. Returns (path, error).
+
+    edge-tts is driven as a subprocess rather than through its asyncio API: this
+    server is threaded and synchronous, so spawning the CLI avoids running an
+    event loop inside a request thread.
+
+    A failing treatment is not fatal: a plain voice still beats no voice, so the
+    untreated render is returned rather than an error.
+    """
+    if not neural_tts_available():
+        return None, "edge-tts is not installed (pip install edge-tts)"
+
+    text = text.strip()
+    if not text:
+        return None, "no text to speak"
+    if len(text) > TTS_MAX_CHARS:
+        text = text[:TTS_MAX_CHARS].rsplit(" ", 1)[0] + "."
+
+    if treatment not in TREATMENT_CHAINS:
+        treatment = DEFAULT_TREATMENT
+
+    TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cached = TTS_CACHE_DIR / f"{_cache_key(text, voice, pitch, rate, treatment)}.mp3"
+    if cached.exists() and cached.stat().st_size > 0:
+        return cached, ""
+
+    # Stage to a unique name then move into place, so two concurrent requests
+    # for the same line cannot read a half-written file.
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+        raw = Path(handle.name)
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "edge_tts",
+             "--voice", voice, "--pitch", pitch, "--rate", rate,
+             "--text", text, "--write-media", str(raw)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+            timeout=TTS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raw.unlink(missing_ok=True)
+        return None, f"speech synthesis timed out after {TTS_TIMEOUT_SECONDS}s"
+    except OSError as exc:
+        raw.unlink(missing_ok=True)
+        return None, f"could not run edge-tts: {exc}"
+
+    if result.returncode != 0 or not raw.exists() or raw.stat().st_size == 0:
+        detail = (result.stderr or "").strip().splitlines()
+        tail = detail[-1] if detail else f"exit code {result.returncode}"
+        raw.unlink(missing_ok=True)
+        return None, f"speech synthesis failed: {tail}"
+
+    # Treat the raw take, falling back to it untreated if ffmpeg is missing or
+    # the chain fails.
+    treated = raw
+    if TREATMENT_CHAINS.get(treatment) and ffmpeg_available():
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as handle:
+            staged = Path(handle.name)
+        ok, _error = apply_treatment(raw, staged, treatment)
+        if ok:
+            treated = staged
+        else:
+            staged.unlink(missing_ok=True)
+
+    try:
+        shutil.move(str(treated), str(cached))
+    except OSError:
+        # Another thread won the race; its copy is just as good.
+        if not cached.exists():
+            if treated != raw:
+                treated.unlink(missing_ok=True)
+            raw.unlink(missing_ok=True)
+            return None, "could not store the rendered audio"
+    finally:
+        if treated != raw:
+            raw.unlink(missing_ok=True)
+
+    return cached, ""
 
 
 # --------------------------------------------------------------------------
@@ -303,7 +539,60 @@ class Handler(BaseHTTPRequestHandler):
             self._json(brain_run(["build"], timeout=300))
             return
 
+        if path == "/api/tts":
+            self._handle_tts(payload)
+            return
+
         self._json({"ok": False, "error": "not found"}, 404)
+
+    def _handle_tts(self, payload: dict) -> None:
+        """Render text to MP3 and return it.
+
+        Returning audio rather than a URL keeps the cache opaque and avoids
+        exposing arbitrary paths: the client never names a file, only text.
+        """
+        text = str(payload.get("text", "")).strip()
+        if not text:
+            self._json({"ok": False, "error": "no text given"}, 400)
+            return
+
+        requested = str(payload.get("voice", "") or DEFAULT_NEURAL_VOICE)
+        pitch, rate = "+0Hz", "+0%"
+        for voice, _label, candidate_pitch, candidate_rate, _note in NEURAL_VOICES:
+            if voice == requested:
+                pitch, rate = candidate_pitch, candidate_rate
+                break
+
+        # Allow the caller to override prosody for the rate slider.
+        if payload.get("pitch"):
+            pitch = str(payload["pitch"])
+        if payload.get("rate"):
+            rate = str(payload["rate"])
+
+        treatment = str(payload.get("treatment", "") or DEFAULT_TREATMENT)
+        if treatment not in TREATMENT_CHAINS:
+            treatment = DEFAULT_TREATMENT
+
+        audio, error = synthesize(text, requested, pitch, rate, treatment)
+        if audio is None:
+            self._json({"ok": False, "error": error}, 503)
+            return
+
+        try:
+            body = audio.read_bytes()
+        except OSError as exc:
+            self._json({"ok": False, "error": f"could not read rendered audio: {exc}"}, 500)
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def main() -> int:
@@ -322,6 +611,7 @@ def main() -> int:
     print(f"  brain.py       {brain_path() or '(not found)'}")
     print(f"  agent          {dsh or '(harness not found)'}")
     print(f"  profile        {os.environ.get('DSH_PROFILE', 'headless')}")
+    print(f"  speech         {'neural (edge-tts)' if neural_tts_available() else 'browser voices only'}")
     print("  " + "-" * 46)
     print(f"  open           http://{host}:{port}")
     print("  stop           Ctrl+C")

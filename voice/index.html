@@ -208,6 +208,27 @@
   .voicerow.chosen .vname { color: var(--accent); font-weight: 600; }
   .voicerow.chosen .vmeta::after { content: "  ✓"; color: var(--accent); }
 
+  .enginebar { display: flex; gap: 7px; margin-bottom: 10px; flex-wrap: wrap; }
+  .enginebar button { font-size: 12px; padding: 5px 11px; border-radius: 999px; }
+  .enginebar button[aria-pressed="true"] {
+    border-color: var(--accent); color: var(--accent); background: #0c2534;
+  }
+  .enginebar button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* Treatment chooser sits under the engine row, same visual language. */
+  .treatedbar {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px;
+  }
+  .treatedbar button { font-size: 12px; padding: 5px 11px; border-radius: 999px; }
+  .treatedbar button[aria-pressed="true"] {
+    border-color: var(--gold); color: var(--gold); background: #2a2211;
+  }
+  .treatedbar button:disabled { opacity: .35; cursor: not-allowed; }
+  .treatedbar .tlabel {
+    font-size: 11px; color: var(--muted); align-self: center;
+    letter-spacing: .1em; text-transform: uppercase; margin-right: 2px;
+  }
+
   /* ---------- composer ---------- */
 
   .composer {
@@ -274,6 +295,8 @@
         <label class="ratelabel" for="rate">Rate <output id="rateOut">1.00</output></label>
         <input type="range" id="rate" min="0.6" max="1.6" step="0.05" value="1">
       </div>
+      <div class="enginebar" id="engineBar"></div>
+      <div class="treatedbar" id="treatedBar"></div>
       <div class="voicelist" id="voiceList"></div>
     </div>
   </section>
@@ -319,13 +342,30 @@ const state = {
   poll: null,
   recognition: null,
   status: null,
+  // Speech output. "neural" means server-rendered edge-tts audio; "browser"
+  // means the platform synthesiser. Neural is preferred when installed, but
+  // the choice is the user's and is remembered.
+  ttsEngine: "neural",
+  neuralVoice: "en-GB-RyanNeural",
+  // The chosen sound treatment, picked by ear from scripts/audition_effects.py.
+  treatment: "movie",
+  audio: null,
 };
 
-// Restore the chosen rate; the voice itself is resolved lazily in pickVoice().
+// Restore the chosen engine, rate, voice and treatment; resolved lazily.
 try {
   const savedRate = parseFloat(localStorage.getItem("jarvis.rate") || "");
   if (savedRate >= 0.6 && savedRate <= 1.6) state.rate = savedRate;
-} catch { /* private mode: fall back to the default */ }
+
+  const savedEngine = localStorage.getItem("jarvis.ttsEngine");
+  if (savedEngine === "browser" || savedEngine === "neural") state.ttsEngine = savedEngine;
+
+  const savedVoice = localStorage.getItem("jarvis.neuralVoice");
+  if (savedVoice) state.neuralVoice = savedVoice;
+
+  const savedTreatment = localStorage.getItem("jarvis.treatment");
+  if (savedTreatment) state.treatment = savedTreatment;
+} catch { /* private mode: keep the defaults */ }
 
 const WAKE_STRIP = /^\s*(hey\s+)?jarvis[\s,.:;!?-]*/i;
 
@@ -346,6 +386,8 @@ const el = {
   rate: document.getElementById("rate"),
   rateOut: document.getElementById("rateOut"),
   testVoice: document.getElementById("testVoice"),
+  engineBar: document.getElementById("engineBar"),
+  treatedBar: document.getElementById("treatedBar"),
   voiceBtn: document.getElementById("voiceBtn"),
   voicePanel: document.getElementById("voicePanel"),
   voiceHint: document.getElementById("voiceHint"),
@@ -557,17 +599,35 @@ function pickVoice() {
   return ranked[0].voice;
 }
 
-/** Read one sample line so a voice can be judged before committing to it. */
+const PREVIEW_LINE =
+  "Good evening, sir. The after-hours rate is two hundred and forty dollars an " +
+  "hour, rising to two hundred and sixty on the first of October.";
+
+/**
+ * Read a sample so a voice can be judged before committing to it.
+ *
+ * With no voiceName, previews whatever is currently selected — which is what
+ * the server-side voice rows do, since the browser has no handle on those.
+ */
 function previewVoice(voiceName, sample) {
+  const line = sample || PREVIEW_LINE;
+
+  if (state.ttsEngine === "neural" && state.status?.tts?.available) {
+    // Reuse the main path so a preview is the real thing, cache and all.
+    speakNeural(line);
+    return;
+  }
+
   if (!("speechSynthesis" in window)) return;
-  const voice = window.speechSynthesis.getVoices().find((v) => v.name === voiceName);
-  if (!voice) return;
+  const voices = window.speechSynthesis.getVoices();
+  const voice = voiceName
+    ? voices.find((v) => v.name === voiceName)
+    : pickVoice();
+  if (!voice && !voiceName) return;
 
   window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(
-    sample || "At your service, sir. The after-hours rate is two hundred and forty dollars an hour."
-  );
-  utterance.voice = voice;
+  const utterance = new SpeechSynthesisUtterance(line);
+  if (voice) utterance.voice = voice;
   utterance.rate = state.rate;
   // Edge's natural voices ignore pitch, and forcing it on SAPI voices is what
   // made JARVIS sound like a slowed-down newsreader. Leave it neutral.
@@ -575,15 +635,84 @@ function previewVoice(voiceName, sample) {
   window.speechSynthesis.speak(utterance);
 }
 
-function speak(text) {
-  if (!state.voice || !text || !("speechSynthesis" in window)) return;
+/**
+ * Say something, using the best engine available.
+ *
+ * Order of preference:
+ *   1. Server-rendered neural audio (edge-tts) — the good voice, any browser.
+ *   2. The browser's own synthesiser — instant, offline, but robotic here.
+ *
+ * A neural failure silently falls back rather than leaving the answer unspoken,
+ * because a missing voice is a far worse outcome than an ugly one.
+ */
+async function speak(text) {
+  if (!state.voice || !text) return;
 
   const clean = speakable(text);
   if (!clean) return;
 
-  // Long answers are read in full but chunked, because Chrome mangles any one
-  // utterance longer than about fourteen seconds.
-  window.speechSynthesis.cancel();
+  window.speechSynthesis?.cancel();
+  state.speaking = true;
+  setOrb("speaking");
+
+  if (state.ttsEngine === "neural" && state.status?.tts?.available) {
+    const ok = await speakNeural(clean);
+    if (ok) return;
+  }
+  speakBrowser(clean);
+}
+
+/** Play server-rendered neural audio. Returns false so the caller can fall back. */
+async function speakNeural(clean) {
+  try {
+    const response = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: clean,
+        voice: state.neuralVoice,
+        treatment: state.treatment,
+        rate: rateToPercent(state.rate),
+      }),
+    });
+    if (!response.ok) return false;
+
+    const blob = await response.blob();
+    if (!blob.size) return false;
+
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+
+    // Hold a reference: a garbage-collected Audio element stops mid-sentence.
+    state.audio = audio;
+
+    const finish = () => {
+      URL.revokeObjectURL(url);
+      state.audio = null;
+      state.speaking = false;
+      setOrb(state.listening ? "listening" : "");
+      if (state.ear) startListening();
+    };
+
+    audio.onended = finish;
+    audio.onerror = () => { finish(); speakBrowser(clean); };
+
+    await audio.play();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The browser's built-in voice — the fallback path. */
+function speakBrowser(clean) {
+  if (!("speechSynthesis" in window)) {
+    state.speaking = false;
+    setOrb(state.listening ? "listening" : "");
+    return;
+  }
+
+  // Chunked, because Chrome mangles any single utterance over about 14 seconds.
   const sentences = clean.match(/[^.!?]+[.!?]*/g) || [clean];
   const groups = [];
   let current = "";
@@ -617,8 +746,51 @@ function speak(text) {
   });
 }
 
-/** Render the voice chooser: every English voice, best guess first. */
+/** Map the 0.6–1.6 rate slider onto edge-tts's percentage form. */
+function rateToPercent(rate) {
+  const delta = Math.round((rate - 1) * 100);
+  return `${delta >= 0 ? "+" : ""}${delta}%`;
+}
+
+function stopSpeaking() {
+  window.speechSynthesis?.cancel();
+  if (state.audio) {
+    try { state.audio.pause(); } catch { /* already stopped */ }
+    state.audio = null;
+  }
+  state.speaking = false;
+  setOrb(state.listening ? "listening" : "");
+}
+
+/** Render the voice chooser: server voices when available, else browser ones. */
 function renderVoices() {
+  const tts = state.status?.tts;
+
+  if (state.ttsEngine === "neural" && tts?.voices?.length) {
+    el.voiceList.innerHTML = "";
+    for (const v of tts.voices) {
+      const row = document.createElement("button");
+      row.className = "voicerow" + (v.id === state.neuralVoice ? " chosen" : "");
+      row.type = "button";
+      row.innerHTML =
+        `<span class="vname">${escapeHtml(v.label)}</span>` +
+        `<span class="vmeta">${escapeHtml(v.pitch)} · ${escapeHtml(v.rate)} · neural</span>`;
+      row.title = v.note || "";
+      row.addEventListener("click", () => {
+        state.neuralVoice = v.id;
+        try { localStorage.setItem("jarvis.neuralVoice", v.id); } catch { /* ignore */ }
+        renderVoices();
+        previewVoice(null);
+      });
+      el.voiceList.appendChild(row);
+    }
+    return;
+  }
+
+  renderBrowserVoices();
+}
+
+function renderBrowserVoices() {
   const ranked = availableVoices();
   const chosen = pickVoice();
 
@@ -1002,6 +1174,11 @@ async function diagnose() {
   const tts = "speechSynthesis" in window;
   tick(tts, "speech synthesis", tts ? "available" : "unavailable");
 
+  const neural = state.status?.tts?.available;
+  tick(!!neural, "neural voice (edge-tts)", neural
+    ? `installed — using ${state.neuralVoice}`
+    : "not installed — run: pip install edge-tts");
+
   const media = !!navigator.mediaDevices?.getUserMedia;
   tick(media, "microphone API", media ? "available" : "unavailable");
 
@@ -1034,32 +1211,107 @@ async function diagnose() {
 }
 
 /** Explain where this browser's voices come from, and why it matters. */
+function renderEngineBar() {
+  const neuralReady = !!state.status?.tts?.available;
+  el.engineBar.innerHTML = "";
+
+  const mk = (engine, label, enabled, title) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.disabled = !enabled;
+    button.title = title;
+    button.setAttribute("aria-pressed", String(state.ttsEngine === engine));
+    button.addEventListener("click", () => {
+      state.ttsEngine = engine;
+      try { localStorage.setItem("jarvis.ttsEngine", engine); } catch { /* ignore */ }
+      stopSpeaking();
+      describeVoiceSupport();
+      renderEngineBar();
+      renderTreatedBar();
+      renderVoices();
+    });
+    el.engineBar.appendChild(button);
+  };
+
+  mk("neural", "Neural (edge-tts)", neuralReady,
+     neuralReady ? "Server-rendered neural voice — best quality, any browser"
+                 : "Install with: pip install edge-tts");
+  mk("browser", "Browser voices", true,
+     "Instant and offline, but robotic on Windows outside Edge");
+}
+
+function renderTreatedBar() {
+  const tts = state.status?.tts;
+  el.treatedBar.innerHTML = "";
+
+  // The treatment is post-processing on the neural render, so it is meaningless
+  // in browser mode.
+  if (state.ttsEngine !== "neural" || !tts?.available) return;
+
+  const label = document.createElement("span");
+  label.className = "tlabel";
+  label.textContent = "Sound";
+  el.treatedBar.appendChild(label);
+
+  for (const t of (tts.treatments || [])) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = t.label;
+    button.disabled = !t.active;
+    button.setAttribute("aria-pressed", String(state.treatment === t.id));
+    button.title = t.active
+      ? "Play a sample to hear this treatment"
+      : "Needs ffmpeg on PATH";
+    button.addEventListener("click", () => {
+      state.treatment = t.id;
+      try { localStorage.setItem("jarvis.treatment", t.id); } catch { /* ignore */ }
+      renderTreatedBar();
+      previewVoice(null);
+    });
+    el.treatedBar.appendChild(button);
+  }
+}
+
 function describeVoiceSupport() {
   const all = ("speechSynthesis" in window) ? window.speechSynthesis.getVoices() : [];
   const english = availableVoices();
-  const neural = english.filter(({ voice }) =>
+  const neuralCount = english.filter(({ voice }) =>
     /natural|neural|online|premium|enhanced/i.test(voice.name || "")).length;
 
   const lines = [];
-  lines.push(`${all.length} voice${all.length === 1 ? "" : "s"} exposed by this ` +
-             `browser, ${english.length} in English` +
-             (neural ? `, ${neural} of them neural.` : "."));
 
-  if (!all.length) {
-    lines.push("Nothing yet — Chrome fills this list in a moment after load. " +
-               "Press “Reload voices”.");
-  } else if (!neural) {
-    // This is the single biggest factor in whether JARVIS sounds human.
-    lines.push(browserName() === "Edge"
-      ? "No neural voices are listed. Edge normally offers 250+; try reloading the page."
-      : `Windows' high-quality neural voices are only exposed to Edge, not ` +
-        `${browserName()}. Open http://127.0.0.1:4731 in Edge for a dramatically ` +
-        "better voice — no installation needed. Chrome and Firefox fall back to " +
-        "the older, robotic SAPI voices (David, Mark, Zira).");
+  if (state.ttsEngine === "neural" && state.status?.tts?.available) {
+    const label = (state.status.tts.voices || [])
+      .find((v) => v.id === state.neuralVoice)?.label || state.neuralVoice;
+    const treatment = (state.status.tts.treatments || [])
+      .find((t) => t.id === state.treatment)?.label || state.treatment;
+    lines.push(`Neural speech is on: ${label}, sound “${treatment}”. It is ` +
+               "rendered by the server, so it sounds the same in every browser — " +
+               "and it supports pitch, which Edge's own neural voices ignore.");
+    lines.push("Pick a voice or a sound below, then press Test voice.");
+  } else if (state.ttsEngine === "neural") {
+    lines.push("Neural speech is not installed. Run: pip install edge-tts, then " +
+               "restart the server. Until then you get the browser's own voices, " +
+               "which on Windows are the robotic ones.");
+  } else {
+    lines.push(`${all.length} voice${all.length === 1 ? "" : "s"} exposed by this ` +
+               `browser, ${english.length} in English` +
+               (neuralCount ? `, ${neuralCount} of them neural.` : "."));
+    if (!all.length) {
+      lines.push("Nothing yet — Chrome fills this list in a moment after load. " +
+                 "Press “Reload voices”.");
+    } else if (!neuralCount) {
+      // The single biggest factor in whether JARVIS sounds human.
+      lines.push(browserName() === "Edge"
+        ? "No neural voices are listed; Edge normally offers 250+. Try reloading."
+        : `Windows' good neural voices are only exposed to Edge, not ` +
+          `${browserName()}. Either switch to the Neural engine above, or open ` +
+          "this page in Edge.");
+    }
+    const chosen = pickVoice();
+    if (chosen) lines.push(`Selected: ${chosen.name} (${chosen.lang})`);
   }
-
-  const chosen = pickVoice();
-  if (chosen) lines.push(`Selected: ${chosen.name} (${chosen.lang})`);
 
   el.voiceHint.textContent = lines.join(" ");
 }
@@ -1087,7 +1339,8 @@ el.voice.addEventListener("click", () => {
   state.voice = !state.voice;
   el.voice.setAttribute("aria-pressed", String(state.voice));
   el.voice.textContent = state.voice ? "Voice on" : "Voice off";
-  if (!state.voice) window.speechSynthesis?.cancel();
+  if (!state.voice) stopSpeaking();
+  try { localStorage.setItem("jarvis.voiceOn", state.voice ? "1" : "0"); } catch { /* ignore */ }
 });
 
 el.memoryBtn.addEventListener("click", () => {
@@ -1107,6 +1360,8 @@ el.voiceBtn.addEventListener("click", () => {
   if (open) {
     el.memory.classList.remove("open");
     el.memoryBtn.setAttribute("aria-pressed", "false");
+    renderEngineBar();
+    renderTreatedBar();
     describeVoiceSupport();
     renderVoices();
   }
@@ -1121,6 +1376,17 @@ el.reloadVoices.addEventListener("click", () => {
 });
 
 el.testVoice.addEventListener("click", () => {
+  if (state.ttsEngine === "neural") {
+    if (!state.status?.tts?.available) {
+      el.voiceHint.textContent =
+        "Neural speech needs edge-tts: run “pip install edge-tts”, then restart " +
+        "the server. Or switch to Browser voices above.";
+      return;
+    }
+    previewVoice(null);
+    return;
+  }
+
   const chosen = pickVoice();
   if (!chosen) {
     el.voiceHint.textContent =
@@ -1203,14 +1469,20 @@ document.addEventListener("keydown", (event) => {
     }
   }
 
-  // The voice list arrives asynchronously in Chrome and is empty on the first
-  // call, so render on the event too rather than only when the panel opens.
   el.rate.value = String(state.rate);
   el.rateOut.textContent = state.rate.toFixed(2);
 
+  renderEngineBar();
+  renderTreatedBar();
+  describeVoiceSupport();
+  renderVoices();
+
   if ("speechSynthesis" in window) {
-    const fillVoices = () => { describeVoiceSupport(); renderVoices(); };
-    fillVoices();
+    // The voice list arrives asynchronously in Chrome and is empty on the first
+    // call, so re-render on the event rather than only when the panel opens.
+    const fillVoices = () => {
+      if (state.ttsEngine === "browser") { describeVoiceSupport(); renderVoices(); }
+    };
     window.speechSynthesis.addEventListener?.("voiceschanged", fillVoices);
   }
 

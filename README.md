@@ -93,17 +93,83 @@ the future 3D view will draw. A note with no links is an orphan.
 
 ### 2. `voice/` — the voice shell
 
-A local web app. Speech is handled **entirely in the browser** via the Web
-Speech API, so there are no speech API keys and no audio leaves your machine —
-only the agent's own model call goes out.
+A local web app. Speech **recognition** runs entirely in the browser via the Web
+Speech API, so there are no speech API keys. Speech **output** is rendered on the
+server (see below), or spoken by the browser as a fallback.
 
 - **Ear** — hands-free. Say *"Jarvis"* and it answers. Chrome stops listening
   after silence, so the shell restarts recognition automatically while the ear is on.
 - **Voice** — answers read aloud, chunked so long replies are not cut off, and
-  the ear resumes when speech finishes.
+  the ear resumes when speech finishes. Markdown is stripped before speaking:
+  links, code, file paths and the source-citation tails the agent appends all
+  read terribly aloud.
 - **Memory** — inspect the brain, search it, rebuild the index, all from the UI.
 - Requests return immediately with a job id and the page polls, because an agent
   answer takes seconds and a browser cannot block on that.
+
+#### Getting a voice that does not sound like a newsreader
+
+Two problems, and both need fixing:
+
+**1. Windows hides its good voices from every browser except Edge.** A default
+install has five SAPI voices (David, Mark, Zira — all American and robotic), and
+Edge's 250+ neural voices are not exposed to Chrome or Firefox at all. So JARVIS
+renders speech **on the server** with [`edge-tts`](https://pypi.org/project/edge-tts/)
+instead, which gives every browser the same British neural voice and real pitch
+control — something Edge's own neural voices ignore.
+
+```bash
+pip install edge-tts
+```
+
+**2. A clean TTS read is flat next to the film.** The Marvel JARVIS is a studio
+recording: close-mic'd, compressed, with a faint metallic ring and a touch of
+room. `synthesize()` therefore pipes the render through an **ffmpeg treatment**
+chain. The default, `movie`, is:
+
+```
+highpass=f=85,
+acompressor=threshold=-19dB:ratio=3.5:attack=6:release=240:makeup=1.8,
+bass=g=3:f=180,
+equalizer=f=3200:t=q:w=0.9:g=1.8,
+aecho=0.85:0.5:9:0.14,
+alimiter=limit=0.94
+```
+
+Other treatments (`warm`, `metallic`, `hud`, `deep`, `none`) ship too. The
+metallic one comes from the TinkerClaw `jarvis-voice` skill (MIT-0), whose
+documented recipe is *"pitch up 5% for a tighter AI feel, flanger for metallic
+sheen, 15ms echo for a robotic ring, treble +6dB for crisp HUD clarity."*
+
+Rendered audio is content-addressed and cached in `%TEMP%\jarvis-voice\tts-cache`,
+so recurring lines ("At your service, sir") are instant after the first render.
+A failing treatment is not fatal — the untreated take is used instead, because a
+plain voice still beats no voice.
+
+**Audition before you commit.** Both choosers are by ear, not by description:
+
+```bash
+python scripts/audition_voices.py     # 8 voices x prosody variants
+python scripts/audition_effects.py    # 7 treatments on one line
+```
+
+Each writes an `index.html` contact sheet you can play through. Set the winner
+with `JARVIS_TTS_VOICE` / `JARVIS_TTS_TREATMENT`, or pick it in the Voice panel.
+
+#### On sounding like the film exactly
+
+It will not, and it is worth being clear about why. Matching Paul Bettany's
+performance would mean reproducing a specific person's voice, which is legally
+exposed without consent and not something this project does. What we reproduce
+is the **archetype** — crisp British, precise, dry, unflappable — plus the
+production that makes it sound recorded rather than synthesised. For a genuine
+match, licence a commercial voice or train on a voice you own.
+
+Worth remembering that most of what makes JARVIS feel like JARVIS is **not the
+voice**. It is the persona: answering without hedging, quoting the real number,
+and being dryly amused about it. That part is free and unlimited, and it is
+enforced by the skill, not the audio.
+
 
 ### 3. `.dsh/skills/jarvis-second-brain/` — the agent's instructions
 
@@ -187,9 +253,13 @@ Jarvis/
 │   ├── test_brain.py       37 tests, no pytest needed
 │   └── sample-brain/       a working demo vault
 ├── voice/
-│   ├── server.py           local HTTP server + job runner
-│   ├── index.html          the UI: ear, voice, memory
+│   ├── server.py           local HTTP server, job runner, neural TTS
+│   ├── index.html          the UI: ear, voice, sound treatment, memory
 │   └── run_headless.py     agent bridge (briefing + one-shot)
+├── scripts/
+│   ├── audition_voices.py  render voices to compare by ear
+│   ├── audition_effects.py render sound treatments to compare by ear
+│   └── list_voices.py      list edge-tts voices worth trying
 ├── .dsh/skills/
 │   └── jarvis-second-brain/SKILL.md
 └── install/
