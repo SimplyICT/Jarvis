@@ -175,6 +175,39 @@
     color: var(--muted); white-space: pre-wrap; word-break: break-word;
   }
 
+  /* ---------- voice chooser ---------- */
+
+  .note {
+    margin: 0 0 10px; font-size: 12px; color: var(--muted); line-height: 1.5;
+  }
+
+  .ratelabel {
+    font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 7px;
+  }
+  .ratelabel output { color: var(--text); font-variant-numeric: tabular-nums; }
+  input[type="range"] { width: 130px; accent-color: var(--accent); }
+
+  .voicelist {
+    display: flex; flex-direction: column; gap: 5px; max-height: 210px;
+    overflow-y: auto; padding-right: 4px;
+  }
+  .voicerow {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 12px; text-align: left; width: 100%;
+    padding: 7px 11px; border-radius: 8px;
+  }
+  .voicerow .vname { font-size: 13px; }
+  .voicerow .vmeta {
+    font-size: 11px; color: var(--muted); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .voicerow.chosen {
+    border-color: var(--accent); background: #0c2534;
+    box-shadow: inset 0 0 14px -8px var(--accent);
+  }
+  .voicerow.chosen .vname { color: var(--accent); font-weight: 600; }
+  .voicerow.chosen .vmeta::after { content: "  ✓"; color: var(--accent); }
+
   /* ---------- composer ---------- */
 
   .composer {
@@ -220,6 +253,9 @@
       <button class="toggle" id="voice" aria-pressed="true" title="Speak answers aloud">
         Voice on
       </button>
+      <button class="toggle" id="voiceBtn" aria-pressed="false" title="Choose JARVIS's voice">
+        Voice
+      </button>
       <button class="toggle" id="memoryBtn" aria-pressed="false" title="Show the second brain">
         Memory
       </button>
@@ -227,6 +263,20 @@
   </header>
 
   <main class="transcript" id="transcript"></main>
+
+  <section class="memory" id="voicePanel">
+    <div class="memory-inner">
+      <h2>Voice</h2>
+      <p class="note" id="voiceHint"></p>
+      <div class="controls" style="margin-bottom:10px; align-items:center">
+        <button id="testVoice">Test voice</button>
+        <button id="reloadVoices">Reload voices</button>
+        <label class="ratelabel" for="rate">Rate <output id="rateOut">1.00</output></label>
+        <input type="range" id="rate" min="0.6" max="1.6" step="0.05" value="1">
+      </div>
+      <div class="voicelist" id="voiceList"></div>
+    </div>
+  </section>
 
   <section class="memory" id="memory">
     <div class="memory-inner">
@@ -261,6 +311,7 @@
 const state = {
   ear: false,          // hands-free listening (the "ear")
   voice: true,         // speak answers aloud
+  rate: 1.0,           // speech rate; persisted in localStorage
   busy: false,         // a job is in flight
   listening: false,
   speaking: false,
@@ -269,6 +320,12 @@ const state = {
   recognition: null,
   status: null,
 };
+
+// Restore the chosen rate; the voice itself is resolved lazily in pickVoice().
+try {
+  const savedRate = parseFloat(localStorage.getItem("jarvis.rate") || "");
+  if (savedRate >= 0.6 && savedRate <= 1.6) state.rate = savedRate;
+} catch { /* private mode: fall back to the default */ }
 
 const WAKE_STRIP = /^\s*(hey\s+)?jarvis[\s,.:;!?-]*/i;
 
@@ -284,6 +341,14 @@ const el = {
   rebuild: document.getElementById("rebuild"),
   showStats: document.getElementById("showStats"),
   diagnose: document.getElementById("diagnose"),
+  voiceList: document.getElementById("voiceList"),
+  reloadVoices: document.getElementById("reloadVoices"),
+  rate: document.getElementById("rate"),
+  rateOut: document.getElementById("rateOut"),
+  testVoice: document.getElementById("testVoice"),
+  voiceBtn: document.getElementById("voiceBtn"),
+  voicePanel: document.getElementById("voicePanel"),
+  voiceHint: document.getElementById("voiceHint"),
   transcript: document.getElementById("transcript"),
   input: document.getElementById("input"),
   send: document.getElementById("send"),
@@ -394,37 +459,194 @@ async function refreshStatus() {
 // Speaking
 // ---------------------------------------------------------------------------
 
+/**
+ * Turn a markdown answer into something worth hearing.
+ *
+ * Left raw, the synthesiser reads "asterisk asterisk dollar two thousand five
+ * hundred asterisk asterisk" and announces the contents of every URL. This
+ * strips everything that only makes sense on a page.
+ */
+function speakable(text) {
+  return String(text)
+    // Code blocks and inline code: drop the code, keep any prose around it.
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    // Markdown links and bare urls: speak the label, never the address.
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/\S+/g, "a link")
+    // Paths like 00-business/rate-card.md read terribly out loud.
+    .replace(/\b[\w.-]+(?:\/[\w.-]+)+\.\w{2,4}\b/g, "a note")
+    // Structure markers.
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*\|.*\|\s*$/gm, " ")      // table rows
+    .replace(/^\s*[-:| ]{3,}\s*$/gm, " ")  // table rules
+    // Source citations are useful on screen and unbearable aloud. The agent
+    // ends almost every answer with one, so a bare "a note" tail reads as a
+    // stutter; drop the whole clause instead.
+    .replace(/[\s,;—–-]*\b(?:per|from|see|source:?|according to)\s+a note\.?/gi, ". ")
+    .replace(/^\s*(?:related|sources?)\s*:?\s*$/gim, "")
+    // Emphasis and leftovers.
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/[_~]/g, " ")
+    // Currency reads better spelled out at speed.
+    .replace(/\$\s?([\d,]+(?:\.\d{2})?)/g, "$1 dollars")
+    .replace(/&/g, " and ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, ". ")
+    // Removing a citation tail can strand a second full stop.
+    .replace(/\.(\s*\.)+/g, ".")
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .trim();
+}
+
+/**
+ * Score a voice for the JARVIS register: a British male, and a neural one if
+ * the browser has it. Anything is better than the Windows default, so the
+ * scale is generous at the bottom.
+ */
+function scoreVoice(voice) {
+  let score = 0;
+  const name = (voice.name || "").toLowerCase();
+  const lang = (voice.lang || "").toLowerCase().replace("_", "-");
+
+  // Locale: British first (JARVIS is a British butler), then other English.
+  if (lang.startsWith("en-gb")) score += 100;
+  else if (lang.startsWith("en-au")) score += 80;
+  else if (lang.startsWith("en")) score += 30;
+
+  // Quality tier. "Natural"/"Neural" voices are in a different league.
+  if (/natural|neural|online|premium|enhanced/.test(name)) score += 60;
+  if (/multilingual/.test(name)) score += 5;
+
+  // Male-presenting names, including Microsoft's and Google's.
+  const male = ["ryan", "thomas", "george", "oliver", "arthur", "daniel", "james",
+                "guy", "david", "mark", "male", "liam", "william", "brian",
+                "christopher", "eric", "roger", "steffan", "alex"];
+  const female = ["sonia", "libby", "hazel", "zira", "female", "aria", "jenny",
+                  "michelle", "emma", "clara", "natasha", "maisie", "olivia"];
+  if (male.some((n) => name.includes(n))) score += 40;
+  if (female.some((n) => name.includes(n))) score -= 40;
+
+  // Desktop SAPI voices are the robotic ones we are trying to avoid.
+  if (/desktop/.test(name)) score -= 35;
+
+  return score;
+}
+
+function availableVoices() {
+  if (!("speechSynthesis" in window)) return [];
+  return (window.speechSynthesis.getVoices() || [])
+    .filter((v) => (v.lang || "").toLowerCase().startsWith("en"))
+    .map((v) => ({ voice: v, score: scoreVoice(v) }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function pickVoice() {
+  const ranked = availableVoices();
+  if (!ranked.length) return null;
+
+  const saved = localStorage.getItem("jarvis.voice");
+  if (saved) {
+    const match = window.speechSynthesis.getVoices().find((v) => v.name === saved);
+    if (match) return match;
+  }
+  return ranked[0].voice;
+}
+
+/** Read one sample line so a voice can be judged before committing to it. */
+function previewVoice(voiceName, sample) {
+  if (!("speechSynthesis" in window)) return;
+  const voice = window.speechSynthesis.getVoices().find((v) => v.name === voiceName);
+  if (!voice) return;
+
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(
+    sample || "At your service, sir. The after-hours rate is two hundred and forty dollars an hour."
+  );
+  utterance.voice = voice;
+  utterance.rate = state.rate;
+  // Edge's natural voices ignore pitch, and forcing it on SAPI voices is what
+  // made JARVIS sound like a slowed-down newsreader. Leave it neutral.
+  utterance.pitch = 1.0;
+  window.speechSynthesis.speak(utterance);
+}
+
 function speak(text) {
   if (!state.voice || !text || !("speechSynthesis" in window)) return;
 
-  // Long answers are read in full but chunked, because some browsers cut off
-  // a single long utterance.
+  const clean = speakable(text);
+  if (!clean) return;
+
+  // Long answers are read in full but chunked, because Chrome mangles any one
+  // utterance longer than about fourteen seconds.
   window.speechSynthesis.cancel();
-  const chunks = text.replace(/\s+/g, " ").match(/[^.!?]+[.!?]*/g) || [text];
+  const sentences = clean.match(/[^.!?]+[.!?]*/g) || [clean];
   const groups = [];
   let current = "";
-  for (const chunk of chunks) {
-    if ((current + chunk).length > 220 && current) { groups.push(current); current = chunk; }
-    else current += chunk;
+  for (const sentence of sentences) {
+    if ((current + sentence).length > 180 && current) { groups.push(current); current = sentence; }
+    else current += sentence;
   }
   if (current) groups.push(current);
 
+  const voice = pickVoice();
   state.speaking = true;
   setOrb("speaking");
 
   groups.forEach((group, index) => {
     const utterance = new SpeechSynthesisUtterance(group.trim());
-    utterance.rate = 1.02;
-    utterance.pitch = 0.92;   // a touch low — closer to the butler register
+    if (voice) utterance.voice = voice;
+    utterance.rate = state.rate;
+    utterance.pitch = 1.0;
     if (index === groups.length - 1) {
       utterance.onend = () => {
         state.speaking = false;
         setOrb(state.listening ? "listening" : "");
         if (state.ear) startListening();
       };
+      utterance.onerror = () => {
+        state.speaking = false;
+        setOrb(state.listening ? "listening" : "");
+      };
     }
     window.speechSynthesis.speak(utterance);
   });
+}
+
+/** Render the voice chooser: every English voice, best guess first. */
+function renderVoices() {
+  const ranked = availableVoices();
+  const chosen = pickVoice();
+
+  if (!ranked.length) {
+    el.voiceList.innerHTML =
+      "<div class='chip'>No English voices reported yet — press “Reload voices”." +
+      " If it stays empty, this browser exposes none.</div>";
+    return;
+  }
+
+  el.voiceList.innerHTML = "";
+  // Show the plausible candidates; a long tail of low scorers is just noise.
+  for (const { voice, score } of ranked.slice(0, 14)) {
+    const row = document.createElement("button");
+    row.className = "voicerow" + (chosen && voice.name === chosen.name ? " chosen" : "");
+    row.type = "button";
+    const tier = /natural|neural|online|premium|enhanced/i.test(voice.name)
+      ? "neural" : "standard";
+    row.innerHTML =
+      `<span class="vname">${escapeHtml(voice.name)}</span>` +
+      `<span class="vmeta">${escapeHtml(voice.lang)} · ${tier}</span>`;
+    row.addEventListener("click", () => {
+      localStorage.setItem("jarvis.voice", voice.name);
+      renderVoices();
+      previewVoice(voice.name);
+    });
+    el.voiceList.appendChild(row);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +1033,37 @@ async function diagnose() {
   el.diagnose.disabled = false;
 }
 
+/** Explain where this browser's voices come from, and why it matters. */
+function describeVoiceSupport() {
+  const all = ("speechSynthesis" in window) ? window.speechSynthesis.getVoices() : [];
+  const english = availableVoices();
+  const neural = english.filter(({ voice }) =>
+    /natural|neural|online|premium|enhanced/i.test(voice.name || "")).length;
+
+  const lines = [];
+  lines.push(`${all.length} voice${all.length === 1 ? "" : "s"} exposed by this ` +
+             `browser, ${english.length} in English` +
+             (neural ? `, ${neural} of them neural.` : "."));
+
+  if (!all.length) {
+    lines.push("Nothing yet — Chrome fills this list in a moment after load. " +
+               "Press “Reload voices”.");
+  } else if (!neural) {
+    // This is the single biggest factor in whether JARVIS sounds human.
+    lines.push(browserName() === "Edge"
+      ? "No neural voices are listed. Edge normally offers 250+; try reloading the page."
+      : `Windows' high-quality neural voices are only exposed to Edge, not ` +
+        `${browserName()}. Open http://127.0.0.1:4731 in Edge for a dramatically ` +
+        "better voice — no installation needed. Chrome and Firefox fall back to " +
+        "the older, robotic SAPI voices (David, Mark, Zira).");
+  }
+
+  const chosen = pickVoice();
+  if (chosen) lines.push(`Selected: ${chosen.name} (${chosen.lang})`);
+
+  el.voiceHint.textContent = lines.join(" ");
+}
+
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
@@ -840,7 +1093,47 @@ el.voice.addEventListener("click", () => {
 el.memoryBtn.addEventListener("click", () => {
   const open = el.memory.classList.toggle("open");
   el.memoryBtn.setAttribute("aria-pressed", String(open));
-  if (open) refreshStatus();
+  // The two drawers share the same space; only one open at a time.
+  if (open) {
+    el.voicePanel.classList.remove("open");
+    el.voiceBtn.setAttribute("aria-pressed", "false");
+    refreshStatus();
+  }
+});
+
+el.voiceBtn.addEventListener("click", () => {
+  const open = el.voicePanel.classList.toggle("open");
+  el.voiceBtn.setAttribute("aria-pressed", String(open));
+  if (open) {
+    el.memory.classList.remove("open");
+    el.memoryBtn.setAttribute("aria-pressed", "false");
+    describeVoiceSupport();
+    renderVoices();
+  }
+});
+
+el.reloadVoices.addEventListener("click", () => {
+  // Chrome populates the voice list asynchronously and can return [] on the
+  // first call, which is why this button exists at all.
+  if ("speechSynthesis" in window) window.speechSynthesis.getVoices();
+  describeVoiceSupport();
+  renderVoices();
+});
+
+el.testVoice.addEventListener("click", () => {
+  const chosen = pickVoice();
+  if (!chosen) {
+    el.voiceHint.textContent =
+      "No voices are available in this browser, so there is nothing to test.";
+    return;
+  }
+  previewVoice(chosen.name);
+});
+
+el.rate.addEventListener("input", () => {
+  state.rate = parseFloat(el.rate.value);
+  el.rateOut.textContent = state.rate.toFixed(2);
+  try { localStorage.setItem("jarvis.rate", String(state.rate)); } catch { /* ignore */ }
 });
 
 el.rebuild.addEventListener("click", rebuildIndex);
@@ -908,6 +1201,17 @@ document.addEventListener("keydown", (event) => {
         "microphone. Open http://127.0.0.1:4731 rather than a network address.",
         { error: true });
     }
+  }
+
+  // The voice list arrives asynchronously in Chrome and is empty on the first
+  // call, so render on the event too rather than only when the panel opens.
+  el.rate.value = String(state.rate);
+  el.rateOut.textContent = state.rate.toFixed(2);
+
+  if ("speechSynthesis" in window) {
+    const fillVoices = () => { describeVoiceSupport(); renderVoices(); };
+    fillVoices();
+    window.speechSynthesis.addEventListener?.("voiceschanged", fillVoices);
   }
 
   el.input.focus();
