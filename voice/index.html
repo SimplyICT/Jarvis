@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS</title>
+<style>
+  :root {
+    --bg: #05070d;
+    --panel: #0d1220;
+    --panel-2: #131a2c;
+    --line: #1e2942;
+    --text: #e6ecf7;
+    --muted: #7d8bab;
+    --accent: #35d1ff;
+    --accent-dim: #1b6d8a;
+    --good: #3ddc97;
+    --warn: #ffb454;
+    --bad: #ff5f6d;
+    --gold: #ffc857;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Everything is one column: header, transcript, composer. */
+  .app {
+    display: flex; flex-direction: column;
+    height: 100%; max-width: 900px; margin: 0 auto;
+    padding: 18px 18px 14px;
+  }
+
+  /* ---------- header ---------- */
+
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding-bottom: 14px; border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+
+  .orb {
+    width: 42px; height: 42px; border-radius: 50%;
+    background: radial-gradient(circle at 34% 32%, #6fe6ff, var(--accent-dim) 58%, #0a2b3a);
+    box-shadow: 0 0 0 1px #1d5c74, 0 0 22px -4px var(--accent);
+    flex: 0 0 auto;
+    transition: box-shadow .2s, filter .2s;
+  }
+  .orb.working { animation: pulse 1.15s ease-in-out infinite; }
+  .orb.listening { box-shadow: 0 0 0 1px #1d5c74, 0 0 34px 2px var(--accent); filter: brightness(1.25); }
+  .orb.speaking { box-shadow: 0 0 0 1px #6b5a1d, 0 0 30px 0px var(--gold); filter: hue-rotate(-24deg) brightness(1.1); }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 1px #1d5c74, 0 0 20px -6px var(--accent); }
+    50%      { box-shadow: 0 0 0 1px #1d5c74, 0 0 34px 3px var(--accent); }
+  }
+
+  .titles { flex: 1 1 220px; min-width: 0; }
+  .titles h1 {
+    margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .13em;
+    text-transform: uppercase;
+  }
+  .titles .sub {
+    font-size: 12px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* ---------- toggles ---------- */
+
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+  button {
+    font: inherit; color: var(--text); cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 12px;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent-dim); background: #172134; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* The "ear" and "focus" toggles mirror his EARS / FOCUS buttons. */
+  button.toggle { min-width: 84px; }
+  button.toggle[aria-pressed="true"] {
+    border-color: var(--accent); color: var(--accent);
+    background: #0c2534; box-shadow: inset 0 0 14px -6px var(--accent);
+  }
+  button.toggle[aria-pressed="true"].gold {
+    border-color: var(--gold); color: var(--gold);
+    background: #2a2211; box-shadow: inset 0 0 14px -6px var(--gold);
+  }
+
+  /* ---------- transcript ---------- */
+
+  .transcript {
+    flex: 1 1 auto; overflow-y: auto; padding: 18px 4px 8px;
+    display: flex; flex-direction: column; gap: 14px;
+    scrollbar-width: thin;
+  }
+  .transcript::-webkit-scrollbar { width: 9px; }
+  .transcript::-webkit-scrollbar-thumb { background: #1c2740; border-radius: 9px; }
+
+  .turn { display: flex; flex-direction: column; gap: 4px; max-width: 88%; }
+  .turn .who {
+    font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .turn .what { white-space: pre-wrap; word-wrap: break-word; }
+
+  .turn.you { align-self: flex-end; align-items: flex-end; }
+  .turn.you .what {
+    background: #16233c; border: 1px solid #24365a;
+    border-radius: 13px 13px 3px 13px; padding: 9px 13px;
+  }
+
+  .turn.jarvis .who { color: var(--accent); }
+  .turn.jarvis .what {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 2px solid var(--accent-dim);
+    border-radius: 3px 13px 13px 13px; padding: 11px 14px;
+  }
+  .turn.jarvis.error .what { border-left-color: var(--bad); color: #ffd8dc; }
+
+  .meta {
+    font-size: 11px; color: var(--muted);
+    display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .meta .grounded { color: var(--good); }
+
+  /* Typing indicator while the agent works. */
+  .dots { display: inline-flex; gap: 4px; padding: 4px 0; }
+  .dots i {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--accent);
+    animation: bounce 1.25s infinite ease-in-out;
+  }
+  .dots i:nth-child(2) { animation-delay: .16s; }
+  .dots i:nth-child(3) { animation-delay: .32s; }
+  @keyframes bounce {
+    0%, 60%, 100% { opacity: .28; transform: translateY(0); }
+    30%           { opacity: 1;   transform: translateY(-4px); }
+  }
+
+  /* ---------- memory drawer ---------- */
+
+  .memory {
+    border-top: 1px solid var(--line);
+    max-height: 0; overflow: hidden;
+    transition: max-height .25s ease;
+  }
+  .memory.open { max-height: 320px; overflow-y: auto; }
+  .memory-inner { padding: 12px 2px 4px; }
+  .memory h2 {
+    margin: 0 0 8px; font-size: 11px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
+  .chip {
+    font-size: 12px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 999px; padding: 3px 10px; color: var(--muted);
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  pre.out {
+    margin: 0; font: 12px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace;
+    color: var(--muted); white-space: pre-wrap; word-break: break-word;
+  }
+
+  /* ---------- composer ---------- */
+
+  .composer {
+    display: flex; gap: 9px; padding-top: 12px;
+    border-top: 1px solid var(--line); align-items: flex-end;
+  }
+  textarea {
+    flex: 1 1 auto; resize: none; min-height: 44px; max-height: 160px;
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 11px; padding: 11px 13px;
+  }
+  textarea:focus { outline: none; border-color: var(--accent-dim); }
+  textarea::placeholder { color: #5a6684; }
+
+  .send {
+    background: var(--accent-dim); border-color: #2b93b8; color: #eafaff;
+    font-weight: 600; padding: 11px 20px;
+  }
+  .send:hover:not(:disabled) { background: #23809f; }
+
+  .hint {
+    font-size: 11px; color: var(--muted); padding-top: 7px; text-align: center;
+  }
+  kbd {
+    font: 11px ui-monospace, Consolas, monospace; background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="orb" id="orb" aria-hidden="true"></div>
+    <div class="titles">
+      <h1>Jarvis</h1>
+      <div class="sub" id="sub">Connecting…</div>
+    </div>
+    <div class="controls">
+      <button class="toggle" id="ear" aria-pressed="false" title="Hands-free: say “Jarvis” to wake">
+        Ear off
+      </button>
+      <button class="toggle" id="voice" aria-pressed="true" title="Speak answers aloud">
+        Voice on
+      </button>
+      <button class="toggle" id="memoryBtn" aria-pressed="false" title="Show the second brain">
+        Memory
+      </button>
+    </div>
+  </header>
+
+  <main class="transcript" id="transcript"></main>
+
+  <section class="memory" id="memory">
+    <div class="memory-inner">
+      <h2>Second brain</h2>
+      <div class="chips" id="memoryChips"></div>
+      <div class="controls" style="margin-bottom:10px">
+        <button id="rebuild">Rebuild index</button>
+        <button id="showStats">Stats</button>
+      </div>
+      <pre class="out" id="memoryOut">Memory controls appear here.</pre>
+    </div>
+  </section>
+
+  <div class="composer">
+    <textarea id="input" rows="1" placeholder="Type a request, or turn the ear on and say “Jarvis …”"></textarea>
+    <button class="send" id="send">Send</button>
+  </div>
+  <div class="hint">
+    <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+const state = {
+  ear: false,          // hands-free listening (the "ear")
+  voice: true,         // speak answers aloud
+  busy: false,         // a job is in flight
+  listening: false,
+  speaking: false,
+  wake: /\b(jarvis|jarvos|jervis|jarvis')\b/i,
+  poll: null,
+  recognition: null,
+  status: null,
+};
+
+const WAKE_STRIP = /^\s*(hey\s+)?jarvis[\s,.:;!?-]*/i;
+
+const el = {
+  orb: document.getElementById("orb"),
+  sub: document.getElementById("sub"),
+  ear: document.getElementById("ear"),
+  voice: document.getElementById("voice"),
+  memoryBtn: document.getElementById("memoryBtn"),
+  memory: document.getElementById("memory"),
+  memoryChips: document.getElementById("memoryChips"),
+  memoryOut: document.getElementById("memoryOut"),
+  rebuild: document.getElementById("rebuild"),
+  showStats: document.getElementById("showStats"),
+  transcript: document.getElementById("transcript"),
+  input: document.getElementById("input"),
+  send: document.getElementById("send"),
+};
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function setOrb(mode) {
+  el.orb.className = "orb" + (mode ? " " + mode : "");
+}
+
+function addTurn(who, text, opts = {}) {
+  const turn = document.createElement("div");
+  turn.className = "turn " + who + (opts.error ? " error" : "");
+
+  const label = document.createElement("div");
+  label.className = "who";
+  label.textContent = who === "you" ? "You" : "Jarvis";
+  turn.appendChild(label);
+
+  const what = document.createElement("div");
+  what.className = "what";
+  what.textContent = text;
+  turn.appendChild(what);
+
+  if (opts.meta) {
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    for (const [text2, cls] of opts.meta) {
+      const span = document.createElement("span");
+      if (cls) span.className = cls;
+      span.textContent = text2;
+      meta.appendChild(span);
+    }
+    turn.appendChild(meta);
+  }
+
+  el.transcript.appendChild(turn);
+  el.transcript.scrollTop = el.transcript.scrollHeight;
+  return { turn, what };
+}
+
+function addWorking() {
+  const { turn, what } = addTurn("jarvis", "");
+  const dots = document.createElement("span");
+  dots.className = "dots";
+  dots.innerHTML = "<i></i><i></i><i></i>";
+  what.appendChild(dots);
+  el.transcript.scrollTop = el.transcript.scrollHeight;
+  return turn;
+}
+
+function renderStatus() {
+  const s = state.status;
+  if (!s) { el.sub.textContent = "Offline"; return; }
+
+  const parts = [];
+  if (s.brain.indexed) {
+    parts.push(`${s.brain.notes} notes · ${s.brain.folders} groups`);
+  } else if (s.brain.configured) {
+    parts.push("brain not indexed");
+  } else {
+    parts.push("no memory vault");
+  }
+  parts.push(s.runner.dsh ? `agent ready (${s.profile})` : "agent not found");
+  el.sub.textContent = parts.join("  ·  ");
+
+  const chips = [
+    ["status", s.runner.dsh ? "agent ready" : "agent missing"],
+    ["vault", s.brain.vault || "unset"],
+    ["notes", String(s.brain.notes ?? "—")],
+    ["groups", String(s.brain.folders ?? "—")],
+    ["indexed", s.brain.built ? s.brain.built.slice(0, 19).replace("T", " ") : "never"],
+  ];
+  el.memoryChips.innerHTML = chips
+    .map(([k, v]) => `<span class="chip">${k} <b>${escapeHtml(v)}</b></span>`)
+    .join("");
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return await response.json();
+}
+
+async function refreshStatus() {
+  try {
+    state.status = await api("/api/status");
+    renderStatus();
+  } catch {
+    el.sub.textContent = "Jarvis server unreachable";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Speaking
+// ---------------------------------------------------------------------------
+
+function speak(text) {
+  if (!state.voice || !text || !("speechSynthesis" in window)) return;
+
+  // Long answers are read in full but chunked, because some browsers cut off
+  // a single long utterance.
+  window.speechSynthesis.cancel();
+  const chunks = text.replace(/\s+/g, " ").match(/[^.!?]+[.!?]*/g) || [text];
+  const groups = [];
+  let current = "";
+  for (const chunk of chunks) {
+    if ((current + chunk).length > 220 && current) { groups.push(current); current = chunk; }
+    else current += chunk;
+  }
+  if (current) groups.push(current);
+
+  state.speaking = true;
+  setOrb("speaking");
+
+  groups.forEach((group, index) => {
+    const utterance = new SpeechSynthesisUtterance(group.trim());
+    utterance.rate = 1.02;
+    utterance.pitch = 0.92;   // a touch low — closer to the butler register
+    if (index === groups.length - 1) {
+      utterance.onend = () => {
+        state.speaking = false;
+        setOrb(state.listening ? "listening" : "");
+        if (state.ear) startListening();
+      };
+    }
+    window.speechSynthesis.speak(utterance);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Listening — the "ear"
+// ---------------------------------------------------------------------------
+
+function speechSupported() {
+  return "webkitSpeechRecognition" in window || "SpeechRecognition" in window;
+}
+
+function startListening() {
+  if (!state.recognition || state.listening || state.speaking) return;
+  try {
+    state.recognition.start();
+  } catch {
+    /* already started — Chrome throws if start() is called twice */
+  }
+}
+
+function stopListening() {
+  if (!state.recognition) return;
+  try { state.recognition.stop(); } catch { /* not running */ }
+}
+
+function buildRecognition() {
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) return null;
+
+  const recognition = new Recognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = "en-AU";
+
+  recognition.onstart = () => {
+    state.listening = true;
+    el.ear.textContent = "Ear on";
+    if (!state.speaking) setOrb("listening");
+  };
+
+  recognition.onend = () => {
+    state.listening = false;
+    if (!state.speaking) setOrb("");
+    // Chrome stops recognition after silence; restart while the ear is on.
+    if (state.ear && !state.busy) setTimeout(startListening, 320);
+  };
+
+  recognition.onerror = (event) => {
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      addTurn("jarvis", "I need microphone permission to listen, sir.", { error: true });
+      setEar(false);
+    }
+  };
+
+  recognition.onresult = (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i];
+      if (!result.isFinal) {
+        // Live preview only when hands-free, so it does not fight the composer.
+        if (state.ear) el.input.value = result[0].transcript.trim();
+        continue;
+      }
+      const said = result[0].transcript.trim();
+      if (!said) continue;
+
+      el.input.value = "";
+      if (!state.ear) { submit(said); continue; }
+
+      // Hands-free: only act on the wake word, then strip it.
+      if (state.wake.test(said)) {
+        const task = said.replace(WAKE_STRIP, "").trim();
+        submit(task || "Yes sir?");
+      }
+    }
+  };
+
+  return recognition;
+}
+
+function setEar(on) {
+  state.ear = on;
+  el.ear.setAttribute("aria-pressed", String(on));
+  el.ear.textContent = on ? "Ear on" : "Ear off";
+
+  if (on) {
+    if (!state.recognition) {
+      state.recognition = buildRecognition();
+      if (!state.recognition) {
+        addTurn("jarvis",
+          "This browser has no speech recognition. Chrome or Edge will work, sir.",
+          { error: true });
+        state.ear = false;
+        el.ear.setAttribute("aria-pressed", "false");
+        el.ear.textContent = "Ear off";
+        return;
+      }
+    }
+    addTurn("jarvis", "Listening, sir. Say “Jarvis” and I'll answer.");
+    startListening();
+  } else {
+    stopListening();
+    setOrb("");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Submitting
+// ---------------------------------------------------------------------------
+
+async function submit(task) {
+  if (state.busy || !task) return;
+  state.busy = true;
+  el.send.disabled = true;
+  window.speechSynthesis?.cancel();
+
+  addTurn("you", task);
+  const bubble = addWorking();
+  setOrb("working");
+
+  try {
+    const started = await api("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task, ground: true }),
+    });
+    if (!started.ok) throw new Error(started.error || "could not start the job");
+
+    const job = await pollJob(started.job_id);
+    bubble.remove();
+
+    if (job.status === "done") {
+      const meta = [];
+      if (job.briefing_chars > 0) {
+        meta.push([`grounded in your notes (${job.briefing_chars} chars)`, "grounded"]);
+      } else {
+        meta.push(["answered without memory"]);
+      }
+      meta.push([`${job.elapsed}s`]);
+      addTurn("jarvis", job.answer || "(no answer)", { meta });
+      speak(job.answer);
+    } else {
+      addTurn("jarvis", job.error || "The agent failed without saying why.", { error: true });
+    }
+  } catch (error) {
+    bubble.remove();
+    addTurn("jarvis", `Something went wrong: ${error.message}`, { error: true });
+  } finally {
+    state.busy = false;
+    el.send.disabled = false;
+    setOrb(state.speaking ? "speaking" : state.listening ? "listening" : "");
+    el.input.focus();
+  }
+}
+
+function pollJob(jobId) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const tick = async () => {
+      try {
+        const data = await api(`/api/job/${jobId}`);
+        const job = data.job;
+        if (job.status === "working") {
+          if (Date.now() - started > 900000) return reject(new Error("timed out"));
+          state.poll = setTimeout(tick, 900);
+          return;
+        }
+        state.poll = null;
+        resolve(job);
+      } catch (error) {
+        state.poll = null;
+        reject(error);
+      }
+    };
+    tick();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Memory panel
+// ---------------------------------------------------------------------------
+
+async function rebuildIndex() {
+  el.rebuild.disabled = true;
+  el.memoryOut.textContent = "Rebuilding the index…";
+  try {
+    const result = await api("/api/memory/rebuild", { method: "POST" });
+    el.memoryOut.textContent = result.ok
+      ? (result.stdout || "Rebuilt.")
+      : `Could not rebuild: ${result.error || result.stderr}`;
+    await refreshStatus();
+  } catch (error) {
+    el.memoryOut.textContent = `Could not rebuild: ${error.message}`;
+  } finally {
+    el.rebuild.disabled = false;
+  }
+}
+
+async function showStats() {
+  el.showStats.disabled = true;
+  el.memoryOut.textContent = "Reading the brain…";
+  try {
+    const result = await api("/api/memory/stats");
+    el.memoryOut.textContent = result.ok
+      ? (result.stdout || "No stats.")
+      : `Could not read stats: ${result.error || result.stderr}`;
+  } catch (error) {
+    el.memoryOut.textContent = `Could not read stats: ${error.message}`;
+  } finally {
+    el.showStats.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
+
+el.ear.addEventListener("click", () => setEar(!state.ear));
+
+el.voice.addEventListener("click", () => {
+  state.voice = !state.voice;
+  el.voice.setAttribute("aria-pressed", String(state.voice));
+  el.voice.textContent = state.voice ? "Voice on" : "Voice off";
+  if (!state.voice) window.speechSynthesis?.cancel();
+});
+
+el.memoryBtn.addEventListener("click", () => {
+  const open = el.memory.classList.toggle("open");
+  el.memoryBtn.setAttribute("aria-pressed", String(open));
+  if (open) refreshStatus();
+});
+
+el.rebuild.addEventListener("click", rebuildIndex);
+el.showStats.addEventListener("click", showStats);
+
+el.send.addEventListener("click", () => {
+  const task = el.input.value.trim();
+  if (task) { el.input.value = ""; submit(task); }
+});
+
+el.input.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    el.send.click();
+  }
+});
+
+// Space on a focused toggle button would re-trigger it; leave that alone, but
+// stop the orb keys from reaching the textarea.
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.busy) {
+    if (state.poll) { clearTimeout(state.poll); state.poll = null; }
+    state.busy = false;
+    el.send.disabled = false;
+    setOrb("");
+    addTurn("jarvis", "Stopped waiting, sir. The agent may still be working.", { error: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
+(async function boot() {
+  await refreshStatus();
+  setInterval(refreshStatus, 30000);
+
+  const s = state.status;
+  if (s && !s.runner.dsh) {
+    addTurn("jarvis",
+      "I can't find the DeepSeek Harness, sir. Set DSH_BIN to " +
+      "@deepseek-ai/dsh/lib/bin.js and restart the server.", { error: true });
+  } else if (s && !s.brain.configured) {
+    addTurn("jarvis",
+      "No memory vault is configured, so I'll be answering blind. " +
+      "Set JARVIS_VAULT to your notes folder and restart the server.");
+  } else if (s && !s.brain.indexed) {
+    addTurn("jarvis",
+      "Your memory vault is set but not indexed yet. Open Memory and hit " +
+      "Rebuild index, sir.");
+  } else {
+    addTurn("jarvis", "At your service, sir. What are we building today?");
+  }
+
+  if (!speechSupported()) {
+    el.ear.disabled = true;
+    el.ear.title = "This browser has no speech recognition";
+  }
+
+  el.input.focus();
+})();
+</script>
+</body>
+</html>
