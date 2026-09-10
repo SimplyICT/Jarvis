@@ -199,11 +199,37 @@ Jarvis/
 ## Tests
 
 ```bash
-python brain/test_brain.py
+python brain/test_brain.py     # 37 tests — memory
+python voice/test_voice.py     # 15 tests — UI wiring
 ```
 
-Covers frontmatter parsing, wikilink resolution, BM25 ordering, the coverage
-regression, snippet generation, the truncation rule, and the CLI contract.
+The brain suite covers frontmatter parsing, wikilink resolution, BM25 ordering,
+the coverage regression, snippet generation, the truncation rule, and the CLI
+contract. The voice suite pins the things that let the ear fail silently:
+inline JavaScript that actually parses, every `getElementById` resolving to real
+markup, the ear never being disabled, and each microphone error being named.
+
+---
+
+## Troubleshooting the voice
+
+Click **Memory → Diagnostics** first. It prints a PASS/FAIL line for the secure
+origin, speech recognition, speech synthesis, the microphone, the harness
+launcher and the memory index, which is almost always enough to name the problem
+outright.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| No microphone prompt at all | The page is on a LAN address, not a loopback one | Open `http://127.0.0.1:4731`, not `http://192.168.x.x:4731` |
+| Ear says it can't do speech recognition | Firefox — `SpeechRecognition` does not exist there | Use Chrome or Edge. Typing still works in any browser |
+| Ear turns on, then instantly off | Microphone is blocked | Padlock in the address bar → Microphone → Allow → reload |
+| "The microphone is busy" | Teams/Zoom/OBS is holding the device | Close it and try again |
+| Ear is on but nothing happens when you speak | The wake word was not heard | Say "Jarvis" first, then the request |
+| Nothing is ever heard | Wrong input device, or the mic is muted | Set the default input in Windows sound settings, then reload |
+
+**Speech is never required.** Typing into the composer exercises the same memory
+and the same agent, so every capability except the wake word works without a
+microphone.
 
 ## Licence
 

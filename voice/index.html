@@ -94,6 +94,13 @@
     background: #2a2211; box-shadow: inset 0 0 14px -6px var(--gold);
   }
 
+  /* Speech unavailable in this browser — still clickable, so it can explain. */
+  button.unsupported {
+    border-style: dashed;
+    border-color: var(--warn);
+    color: var(--warn);
+  }
+
   /* ---------- transcript ---------- */
 
   .transcript {
@@ -228,6 +235,7 @@
       <div class="controls" style="margin-bottom:10px">
         <button id="rebuild">Rebuild index</button>
         <button id="showStats">Stats</button>
+        <button id="diagnose">Diagnostics</button>
       </div>
       <pre class="out" id="memoryOut">Memory controls appear here.</pre>
     </div>
@@ -275,6 +283,7 @@ const el = {
   memoryOut: document.getElementById("memoryOut"),
   rebuild: document.getElementById("rebuild"),
   showStats: document.getElementById("showStats"),
+  diagnose: document.getElementById("diagnose"),
   transcript: document.getElementById("transcript"),
   input: document.getElementById("input"),
   send: document.getElementById("send"),
@@ -529,61 +538,109 @@ function buildRecognition() {
   return recognition;
 }
 
-function setEar(on) {
-  state.ear = on;
-  el.ear.setAttribute("aria-pressed", String(on));
-  el.ear.textContent = on ? "Ear on" : "Ear off";
-
-  if (on) {
-    // Ask for the microphone explicitly. Speech recognition would prompt too,
-    // but requesting it here means a refusal surfaces immediately and clearly
-    // instead of as silence.
-    requestMicrophone();
-
-    if (!state.recognition) {
-      state.recognition = buildRecognition();
-      if (!state.recognition) {
-        addTurn("jarvis",
-          "This browser has no speech recognition. Chrome or Edge will work, sir.",
-          { error: true });
-        state.ear = false;
-        el.ear.setAttribute("aria-pressed", "false");
-        el.ear.textContent = "Ear off";
-        return;
-      }
-    }
-    addTurn("jarvis", "Listening, sir. Say “Jarvis” and I'll answer.");
-    startListening();
-  } else {
+/**
+ * Turn hands-free listening on or off.
+ *
+ * Returns true only when listening actually began. Every early exit reports why
+ * in the transcript, because a toggle that silently refuses to move is the worst
+ * possible failure: it looks like the app is broken and gives no next step.
+ */
+async function setEar(on) {
+  if (!on) {
+    state.ear = false;
+    el.ear.setAttribute("aria-pressed", "false");
+    el.ear.textContent = "Ear off";
     stopListening();
     setOrb("");
+    return true;
   }
+
+  // 1. Can this browser do speech recognition at all?
+  if (!speechSupported()) {
+    addTurn("jarvis",
+      `This browser can't do speech recognition (${browserName()}), so the ear ` +
+      "has nothing to listen with. Open http://127.0.0.1:4731 in Chrome or Edge " +
+      "and the ear will work. You can type to me here in the meantime.",
+      { error: true });
+    return false;
+  }
+
+  // 2. Is there actually a microphone we are allowed to use?
+  const mic = await requestMicrophone();
+  if (!mic.ok) {
+    addTurn("jarvis", mic.reason, { error: true });
+    return false;
+  }
+
+  // 3. Build the recogniser if this is the first time.
+  if (!state.recognition) {
+    state.recognition = buildRecognition();
+    if (!state.recognition) {
+      addTurn("jarvis",
+        "Speech recognition failed to start. Chrome or Edge will work, sir.",
+        { error: true });
+      return false;
+    }
+  }
+
+  state.ear = true;
+  el.ear.setAttribute("aria-pressed", "true");
+  el.ear.textContent = "Ear on";
+  addTurn("jarvis", "Listening, sir. Say “Jarvis” and I'll answer.");
+  startListening();
+  return true;
+}
+
+function browserName() {
+  const ua = navigator.userAgent;
+  if (/Edg\//.test(ua)) return "Edge";
+  if (/OPR\//.test(ua)) return "Opera";
+  if (/Firefox\//.test(ua)) return "Firefox";
+  if (/Chrome\//.test(ua)) return "Chrome";
+  if (/Safari\//.test(ua)) return "Safari";
+  return "this browser";
 }
 
 // Browsers only expose the microphone on a secure origin. 127.0.0.1 and
 // localhost qualify; a LAN address does not, and that failure is otherwise mute.
 async function requestMicrophone() {
   if (!navigator.mediaDevices?.getUserMedia) {
-    addTurn("jarvis",
-      "This page can't reach a microphone. Browsers only allow that on " +
-      "http://127.0.0.1 or https — check the address bar.", { error: true });
-    return false;
+    return {
+      ok: false,
+      reason: "This page can't reach a microphone. Browsers only allow that " +
+              "on http://127.0.0.1 or https. If you opened this over a LAN " +
+              "address, use 127.0.0.1 instead.",
+    };
   }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     // Release the device at once; speech recognition opens its own capture.
     stream.getTracks().forEach((track) => track.stop());
-    return true;
+    return { ok: true, reason: "" };
   } catch (error) {
-    const reason = error?.name === "NotAllowedError"
-      ? "You blocked the microphone. Click the padlock in the address bar, " +
-        "set Microphone to Allow, then reload the page."
-      : `I can't open a microphone (${error?.name || "unknown error"}).`;
-    addTurn("jarvis", reason, { error: true });
-    state.ear = false;
-    el.ear.setAttribute("aria-pressed", "false");
-    el.ear.textContent = "Ear off";
-    return false;
+    let reason;
+    switch (error?.name) {
+      case "NotAllowedError":
+        reason = "The microphone is blocked. Click the padlock in the address " +
+                 "bar, set Microphone to Allow, then reload the page.";
+        break;
+      case "NotFoundError":
+      case "OverconstrainedError":
+        reason = "No microphone was found. Plug one in, or set a default input " +
+                 "device in Windows sound settings, then reload.";
+        break;
+      case "NotReadableError":
+        reason = "The microphone is busy — another app is holding it. Close " +
+                 "that app (Teams, Zoom, OBS) and try again.";
+        break;
+      case "SecurityError":
+        reason = "The browser blocked audio capture for this origin. Load the " +
+                 "shell at http://127.0.0.1:4731, or serve it over https.";
+        break;
+      default:
+        reason = `I can't open a microphone (${error?.name || "unknown error"}).`;
+    }
+    return { ok: false, reason };
   }
 }
 
@@ -694,11 +751,84 @@ async function showStats() {
   }
 }
 
+// One-click capability report. Every voice problem this shell can have is one
+// of these facts, so printing them removes the guesswork from "the ear won't
+// turn on".
+async function diagnose() {
+  el.diagnose.disabled = true;
+  el.memoryOut.textContent = "Checking capabilities…";
+
+  const lines = [];
+  const tick = (ok, label, detail) =>
+    lines.push(`${ok ? "PASS" : "FAIL"}  ${label.padEnd(26)} ${detail}`);
+
+  lines.push(`JARVIS voice shell — capability report`);
+  lines.push(`browser      ${browserName()}`);
+  lines.push(`page origin  ${location.origin}`);
+  lines.push(`user agent   ${navigator.userAgent}`);
+  lines.push("");
+
+  const secure = window.isSecureContext !== false;
+  tick(secure, "secure context", secure
+    ? "yes (microphone is permitted here)"
+    : "NO — load http://127.0.0.1:4731 instead of a LAN address");
+
+  const rec = speechSupported();
+  tick(rec, "speech recognition",
+    rec ? "available" : `unavailable in ${browserName()} — use Chrome or Edge`);
+
+  const tts = "speechSynthesis" in window;
+  tick(tts, "speech synthesis", tts ? "available" : "unavailable");
+
+  const media = !!navigator.mediaDevices?.getUserMedia;
+  tick(media, "microphone API", media ? "available" : "unavailable");
+
+  if (media) {
+    const mic = await requestMicrophone();
+    tick(mic.ok, "microphone permission",
+      mic.ok ? "granted and the device opens" : mic.reason);
+  }
+
+  // Server side.
+  try {
+    const s = await api("/api/status");
+    tick(s.runner.dsh, "harness launcher", s.runner.dsh ? "found" : "NOT FOUND");
+    tick(s.runner.brain, "brain.py", s.runner.brain ? "found" : "NOT FOUND");
+    tick(s.brain.configured, "memory vault",
+      s.brain.configured ? s.brain.vault : "JARVIS_VAULT not set");
+    tick(s.brain.indexed, "memory index", s.brain.indexed
+      ? `${s.brain.notes} notes, built ${String(s.brain.built).slice(0, 19)}`
+      : "not built — press Rebuild index");
+  } catch (error) {
+    tick(false, "server", `unreachable: ${error.message}`);
+  }
+
+  lines.push("");
+  lines.push("If speech recognition FAILS, typing still works — the memory and");
+  lines.push("the agent are independent of the microphone.");
+
+  el.memoryOut.textContent = lines.join("\n");
+  el.diagnose.disabled = false;
+}
+
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
-el.ear.addEventListener("click", () => setEar(!state.ear));
+el.ear.addEventListener("click", async () => {
+  // A refusal now leaves the ear visibly off with an explanation, so a failed
+  // attempt is never a no-op the user has to interpret.
+  const on = !state.ear;
+  if (on) {
+    el.ear.setAttribute("aria-pressed", "true");
+    el.ear.textContent = "Ear on";
+  }
+  const started = await setEar(on);
+  if (!started) {
+    el.ear.setAttribute("aria-pressed", "false");
+    el.ear.textContent = "Ear off";
+  }
+});
 
 el.voice.addEventListener("click", () => {
   state.voice = !state.voice;
@@ -715,6 +845,7 @@ el.memoryBtn.addEventListener("click", () => {
 
 el.rebuild.addEventListener("click", rebuildIndex);
 el.showStats.addEventListener("click", showStats);
+el.diagnose.addEventListener("click", diagnose);
 
 el.send.addEventListener("click", () => {
   const task = el.input.value.trim();
@@ -765,9 +896,18 @@ document.addEventListener("keydown", (event) => {
     addTurn("jarvis", "At your service, sir. What are we building today?");
   }
 
+  // Do NOT disable the ear when speech is unsupported. A disabled button is a
+  // dead end: it cannot be clicked and cannot explain itself. Leave it live so
+  // clicking it produces an error message naming the browser and the fix.
   if (!speechSupported()) {
-    el.ear.disabled = true;
-    el.ear.title = "This browser has no speech recognition";
+    el.ear.title = `No speech recognition in ${browserName()} — click for details`;
+    el.ear.classList.add("unsupported");
+    if (window.isSecureContext === false) {
+      addTurn("jarvis",
+        "This page is not on a secure origin, so the browser will refuse the " +
+        "microphone. Open http://127.0.0.1:4731 rather than a network address.",
+        { error: true });
+    }
   }
 
   el.input.focus();

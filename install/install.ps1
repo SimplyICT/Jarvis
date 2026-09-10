@@ -250,30 +250,38 @@ if ((Test-Path $launcherPath) -and -not $Force) {
 Write-Host ""
 Write-Host "  5. verification" -ForegroundColor Cyan
 
-$testFile = Join-Path $repo 'brain\test_brain.py'
-# unittest writes progress to stderr. Piping a native command's stderr makes
-# PowerShell raise a NativeCommandError that $ErrorActionPreference='Stop'
-# turns fatal, so capture to a temp file outside the pipeline instead.
-$testLog = Join-Path $env:TEMP ("jarvis-tests-{0}.txt" -f $PID)
-# -ArgumentList joins its array with spaces, so a path containing spaces must
-# carry its own quotes or it is split into several arguments.
-$testProc = Start-Process -FilePath $python -ArgumentList @("`"$testFile`"") `
-    -NoNewWindow -Wait -PassThru `
-    -RedirectStandardOutput $testLog -RedirectStandardError "$testLog.err"
+$suites = @(
+    @{ Name = 'brain'; Path = (Join-Path $repo 'brain\test_brain.py') },
+    @{ Name = 'voice'; Path = (Join-Path $repo 'voice\test_voice.py') }
+)
 
-$testOutput = ''
-foreach ($f in @($testLog, "$testLog.err")) {
-    if (Test-Path $f) { $testOutput += (Get-Content $f -Raw) + "`n" }
-}
-Remove-Item $testLog, "$testLog.err" -ErrorAction SilentlyContinue
+foreach ($suite in $suites) {
+    if (-not (Test-Path $suite.Path)) { continue }
 
-if ($testProc.ExitCode -eq 0) {
-    $ran = if ($testOutput -match 'Ran (\d+) test') { $Matches[1] } else { '?' }
-    Write-Ok "$ran brain tests passed"
-} else {
-    Write-Warn "some brain tests failed:"
-    $testOutput -split "`n" | Where-Object { $_ -match '\S' } |
-        Select-Object -Last 12 | ForEach-Object { Write-Step $_.TrimEnd() }
+    # unittest writes progress to stderr. Piping a native command's stderr makes
+    # PowerShell raise a NativeCommandError that $ErrorActionPreference='Stop'
+    # turns fatal, so capture to temp files outside the pipeline instead.
+    $testLog = Join-Path $env:TEMP ("jarvis-{0}-tests-{1}.txt" -f $suite.Name, $PID)
+    # -ArgumentList joins its array with spaces, so a path containing spaces must
+    # carry its own quotes or it is split into several arguments.
+    $testProc = Start-Process -FilePath $python -ArgumentList @("`"$($suite.Path)`"") `
+        -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $testLog -RedirectStandardError "$testLog.err"
+
+    $testOutput = ''
+    foreach ($f in @($testLog, "$testLog.err")) {
+        if (Test-Path $f) { $testOutput += (Get-Content $f -Raw) + "`n" }
+    }
+    Remove-Item $testLog, "$testLog.err" -ErrorAction SilentlyContinue
+
+    if ($testProc.ExitCode -eq 0) {
+        $ran = if ($testOutput -match 'Ran (\d+) test') { $Matches[1] } else { '?' }
+        Write-Ok "$ran $($suite.Name) tests passed"
+    } else {
+        Write-Warn "some $($suite.Name) tests failed:"
+        $testOutput -split "`n" | Where-Object { $_ -match '\S' } |
+            Select-Object -Last 12 | ForEach-Object { Write-Step $_.TrimEnd() }
+    }
 }
 
 Write-Host ""
