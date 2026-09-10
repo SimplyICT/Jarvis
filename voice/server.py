@@ -207,6 +207,27 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def handle_one_request(self) -> None:
+        """Treat a dropped client as routine.
+
+        With HTTP/1.1 keep-alive the browser holds the socket open and closes it
+        when it likes, so a reset while waiting for the next request line is
+        normal. The base class prints a full traceback for it, which buries real
+        errors in noise.
+        """
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError,
+                TimeoutError, OSError):
+            self.close_connection = True
+
+    def handle(self) -> None:
+        """Same reasoning as above, for the connect and teardown path."""
+        try:
+            super().handle()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass
+
     def _json(self, payload: dict, status: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
@@ -322,6 +343,13 @@ def main() -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n  JARVIS offline.\n")
+    except Exception as exc:
+        # serve_forever only returns or raises when something is genuinely wrong:
+        # the port was taken, or a handler blew up in a way that escaped. Say so
+        # instead of vanishing with a bare exit code.
+        print(f"\n  ! The server stopped: {type(exc).__name__}: {exc}\n",
+              file=sys.stderr)
+        return 1
     finally:
         server.server_close()
     return 0
