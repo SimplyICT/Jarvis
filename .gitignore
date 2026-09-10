@@ -21,3 +21,6 @@ voice/*.mp3
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# Commit-message scratch files
+.*.tmp
