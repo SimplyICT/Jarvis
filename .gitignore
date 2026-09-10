@@ -8,8 +8,13 @@ jarvis.cmd
 # Audition output. Regenerate with:
 #   python scripts/audition_voices.py
 #   python scripts/audition_effects.py
+#   python scripts/diagnose_prosody.py
+#   python scripts/diagnose_chunking.py
 voice/samples/
 voice/treatments/
+voice/prosody/
+voice/chunking/
+voice/*.mp3
 
 # Scratch
 *.log

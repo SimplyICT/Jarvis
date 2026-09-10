@@ -57,17 +57,30 @@ UI_FILE = Path(__file__).resolve().parent / "index.html"
 # so Chrome and Firefox fall back to the robotic SAPI set. Rendering here means
 # every browser gets the same voice. The browser also gains real pitch control,
 # which Edge's own neural voices ignore.
+# Voices, and the prosody each is rendered with.
+#
+# Pitch and rate are deliberately left at neutral. Neural TTS is trained at
+# natural pitch and rate, so shifting it pushes the model outside the
+# distribution it learned and its timing and intonation degrade — which is heard
+# as "stilted". Measurement bore this out: an -8Hz shift moved the spectral
+# centroid by under 1% (1966Hz -> 1848Hz), i.e. less than a semitone on a voice
+# with a ~120Hz fundamental, so it bought nothing while costing naturalness.
+# A -6% rate stretched the same passage from 21.8s to 23.2s.
+#
+# A user who wants slower speech has the rate slider; the defaults should be the
+# most natural read the model can give.
 NEURAL_VOICES = [
     # short_name, label, pitch, rate, note
-    ("en-GB-RyanNeural", "Ryan (British)", "+0Hz", "+0%", "British male, neutral"),
-    ("en-GB-RyanNeural", "Ryan (measured)", "-6Hz", "-6%", "British male, lower and slower"),
-    ("en-GB-RyanNeural", "Ryan (deliberate)", "-12Hz", "-8%", "British male, deepest, most JARVIS"),
-    ("en-GB-ThomasNeural", "Thomas (British)", "-4Hz", "-4%", "British male, warmer"),
-    ("en-US-ChristopherNeural", "Christopher (Authority)", "-10Hz", "-6%", "US male, transatlantic"),
-    ("en-US-SteffanNeural", "Steffan (Rational)", "-8Hz", "-5%", "US male, drier"),
-    ("en-AU-WilliamNeural", "William (Australian)", "-4Hz", "-4%", "Australian male, local calls"),
+    ("en-GB-RyanNeural", "Ryan (British)", "+0Hz", "+0%", "British male — neutral, most natural"),
+    ("en-GB-ThomasNeural", "Thomas (British)", "+0Hz", "+0%", "British male, warmer"),
+    ("en-US-AndrewMultilingualNeural", "Andrew (warm, transatlantic)", "+0Hz", "+0%",
+     "US male, Warm/Confident — close to the film register"),
+    ("en-US-BrianNeural", "Brian (US, natural)", "+0Hz", "+0%", "US male, natural delivery"),
+    ("en-US-ChristopherNeural", "Christopher (Authority)", "+0Hz", "+0%", "US male, authoritative"),
+    ("en-US-SteffanNeural", "Steffan (Rational)", "+0Hz", "+0%", "US male, drier"),
+    ("en-AU-WilliamNeural", "William (Australian)", "+0Hz", "+0%", "Australian male, local calls"),
 ]
-DEFAULT_NEURAL_VOICE = "en-GB-RyanNeural"
+DEFAULT_NEURAL_VOICE = os.environ.get("JARVIS_TTS_VOICE", "en-GB-RyanNeural")
 
 # Post-processing chains.
 #

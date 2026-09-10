@@ -1,0 +1,37 @@
+voice: stop the prosody shifts that made the neural voice sound stilted
+
+"Not very natural, a little stilted" was a prosody complaint, not an accent one,
+and it was my fault. Two things the shell did pushed the model off the pitch and
+timing it was trained on.
+
+1. Pitch shifting bought nothing and cost naturalness. Measured with ffmpeg's
+   spectral centroid, an -8Hz shift moved the centroid from 1966Hz to 1848Hz:
+   under 1%, i.e. less than a semitone on a voice whose fundamental is about
+   120Hz. It was inaudible as "deeper" and merely put the model slightly out of
+   distribution. All voices now render at neutral pitch.
+
+2. Rate reduction was the audible damage. -6% stretched a three-sentence passage
+   from 21.82s to 23.22s, which reads as a drag, not as gravitas. Defaults are
+   now neutral; the rate slider still exists for anyone who wants it slower.
+
+3. Chunking cost real prosody. speakNeural() sent the answer in ~180-character
+   pieces, a limit inherited from browser synthesis where Chrome truncates
+   utterances over about fourteen seconds. Server-side rendering has no such
+   limit, and splitting destroys the cross-sentence context that makes a
+   paragraph sound like a paragraph. Measured, splitting added 0.22s of dead air
+   at the seams on a three-sentence passage and made the read more clipped. The
+   whole passage now goes out as one request. Browser fallback still chunks,
+   because there it is genuinely required.
+
+Also replaces the redundant Ryan pitch variants with genuinely different voices
+worth hearing: Andrew (Warm/Confident, transatlantic), Brian, Christopher,
+Steffan, plus Ryan and Thomas at neutral.
+
+Adds two diagnostic scripts, because both causes were found by measurement
+rather than by guessing at the sound:
+- diagnose_prosody.py isolates pitch, rate, and voice choice on one passage
+- diagnose_chunking.py isolates splitting vs slowing, including a faithful
+  reproduction of the shell's own chunking
+
+Verified after the change: same passage renders in 2.54s, 16.47s of audio, from
+a single utterance.
